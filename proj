@@ -1,0 +1,580 @@
+#!/bin/bash
+######### RUN AS ROOT!
+########## you added *.ovpn*
+#clear
+##################### "connection functions"
+check_internet(){
+	check_gateway
+	counter=0
+	ping_output=($(check_ping))
+    ping_status="${ping_output[0]}"
+	#echo "$ping_status"
+	ping_result="${ping_output[1]}" 2> /dev/null
+	#echo "$ping_result"
+	while [[ $ping_status -eq 1 && $counter -lt 3 ]]; do   ### tries 3 times at most to restart the internet interface if the ping result wasn't satisfactory 
+		counter=$(( $counter + 1 ))
+		[ $ping_result -eq 0 ] && echo "no internet connection at all contact your internet provider" && exit 1
+		/etc/init.d/networking restart > /dev/null ### restarts interfaces
+		#echo "$counter"
+	done
+	[ $counter -eq 3 ] && echo "weak internet connection" && exit 1
+}
+check_gateway(){
+if ip route | grep "default via" > /dev/null && \
+[ $(( "$(ip route | wc -w)" - "$(ip route | sed 's/default via//g'| wc -w)" )) -eq 2 ]; ## checks if there exists a gateway and if so if there is only one
+then
+	echo "default gateway verified" > /dev/null
+else
+	echo "either there is no gateway or there is more than one" >&2
+	exit 1 
+fi
+}
+check_ping(){
+	num="$(echo "$(ping -q -c 5 8.8.8.8)" | sed -n -E 's/.+ ([0-9]) received,.+/\1/p')" #### the number of succesful pings to 8.8.8.8
+	#echo "$num"
+	if [ $num -gt 3 ];
+then
+	echo "0"
+	return
+else
+	echo "1 $num"
+fi	
+}
+#################################### end of "connection functions"
+
+################################### disk dev functions
+check_disk(){
+	if ! (echo "$(mount)" | grep /dev/sr0 > /dev/null); then      ######## checks whether there's a cd mounted on the sys
+			mkdir $HOME/mountp/ 2> /dev/null                                ###### if there ins't it would be mounted in /root/mountp
+		mount /dev/sr0 $HOME/mountp > /dev/null 2>&1
+
+	fi
+	 
+	if ! (echo "$(mount)" | grep /dev/sr0 > /dev/null); then
+		echo "either there is a problem with CDROM or with disc inserted or the CDROM is empty" ######### if mounting fails error message is displayed
+		exit 1
+	fi
+}
+mount_point(){
+
+	mount_point="$(echo "$(mount)" | grep /dev/sr0 | sed -n -E 's/\/dev\/sr0 on ([^ ]+) .+/\1/p')" ########## if there is a mounted cd the mount point would be outputed
+	echo "$mount_point"
+}
+################################## end of disk dev functions
+
+############################### copying and user modifying ovpn files functions
+copy_VPN_files(){
+ 	if [ ! -d "$HOME/temp1" ]; then        ######## checks whether the temp1 directory already exists if it does it cleans it
+		mkdir "$HOME/temp1" 
+	else
+		rm -r $HOME/temp1/*
+	fi
+	if [ -n "$(find "$mount_p" -name '*.ovpn*')" ]; then   ########## checks whether ovpn files exists in the cd
+		find "$mount_p"  -name '*.ovpn*' | xargs -I % cp "%" /$HOME/temp1 > /dev/null  ##### copies the matching files into a temp directory
+		#echo "hello"
+	else
+		echo "there aren't any openvpn files to be configured in the cd" ####### if there isn't an error is displayed
+		#echo "bye"
+		exit 1
+	fi
+}
+copy_Login_ETC_files(){
+	if [ ! -d "$HOME/ETC" ];then
+		mkdir "$HOME/ETC"
+	else
+		rm -r $HOME/ETC/* 2> /dev/null
+	fi
+	echo "hello"
+	search="$(ls $HOME/temp1 | xargs -I % grep -E "^auth-user-pass" $HOME/temp1/"%")" ###### checking if there are USERNAME,PASSWORD authentication lines in files
+	if [ -n $search ]; then ###### checking if there are USERNAME,PASSWORD authentication lines in files
+		echo "hey"
+		login_names="$(find "$mount_p" -name '*[lL]ogin*')" ########## looks for potential login_details files by name
+		echo "$login_names"
+		num_of_login_files="$(echo "$login_names" | wc -l)" ######### how many potential
+		echo "$num_of_login_files"
+		if [[ $num_of_login_files -ne 0 &&  -n $login_names ]];then ######### if not 0 found
+			if [[ $num_of_login_files -ne 1 ]];then ####### if more than one potential
+				while true;do
+					clear
+					echo "###############################################################################################"
+					echo "There's more than one potential login-details file"
+					echo -e  "Please choose the file you want to use as login-details file by writing its ordinal number"
+					echo "###############################################################################################"
+					echo "$(echo "$login_names"| sort | nl)" ######### gives a numbered sorted list of potential files
+					read log_file_number
+					if [[ ! ($log_file_number -gt 0 && $log_file_number -le "$num_of_login_files") ]]; then ####### checks users input validity
+						echo "invalid file number"
+						sleep 5
+						continue
+					else
+						login_file="$(echo "$login_names" | sort | sed -n "$log_file_number"'p' )" ######## login files path
+						clear
+						echo "login detail file contants:"
+						cat "$login_file"            ######## show content of the file
+						echo -e "\n\nto continue write: C\nto choose another file write everything except C\n"
+						read
+						if [ $REPLY == C ];then ########## if to use it
+							cp "$login_file" $HOME/ETC/pass
+							break
+						else        ######### ther'e must be one so it begins again
+							continue
+						fi
+					fi
+				done
+			else
+				login_file="$login_names" ####### if just 1 file found use it
+				cp "$login_file" $HOME/ETC/pass
+			fi
+		else
+			clear
+			echo "No potential login-details file found" ####### if none found takes users input
+			echo "please write a full path to the login-details file or write 1 to continue without one"
+			read
+			if [ ! $REPLY == 1 ];then
+				login_file="$REPLY"
+				cp "$login_file" $HOME/ETC/pass 2> /dev/null 
+				if [ "$?" -ne 0 ];then
+					echo "there was a problem with copying this file you will continue without one"
+				fi
+			fi
+		fi
+	fi
+	###################################################################### copying crt files if exist
+	find $HOME/temp1 -name "*.crt" | xargs -I % cp "%" $HOME/ETC  2> /dev/null
+}
+create_display_file(){ ##### a text file which consists of an ordinal list of the OVPN files from the CD 
+	#echo "$HOME/temp1/README"
+	if [ ! -r "$HOME/temp1/README" ]; then ##### if the file has already been created nothing occours
+		>$HOME/temp1/README
+		echo "				These are the working OVPN Configuration files.  
+				Press 'q' to stop viewing and start chosing files to edit and a file to process" > $HOME/temp1/README
+		echo "##################################################################################################################" >> $HOME/temp1/README
+		echo -e "IMPORTANT: FILES TO CHOOSE AND TO EDIT ARE IDENTIFIED BY THEIR ORDINAL NUMBER" >> $HOME/temp1/README   ############### headers for the file with instructions		
+		echo "##################################################################################################################" >> $HOME/temp1/README
+		echo -e "\n \n" >> "$HOME/temp1/README"            
+		find "$HOME/temp1/" -name '*.ovpn*' | sort | nl >> $HOME/temp1/README ################ a sorted list of the OVPN files inserted to the file	
+	fi
+
+}
+chose2edit_process(){ ############ the user is displayed the README files and decides whether he wants to edit a file or proccess one. 
+	while true; do
+		clear
+		create_display_file
+		#less "$HOME/temp1/README"
+		echo -e " #################################################################################################" ######## creating headers
+		echo -e "\t\tTo edit write: -E -Filenum \n\t\tTo process a file write: -P -Filenum \n\t\tTo view Files list write:-M\n \t\tTo exit write: q " 
+		echo -e " #################################################################################################"
+		read
+		if [[ "$REPLY" =~ ^-E" "-[0-9]+$ ]]; then      ############ checking users input format
+			Filenum="$(echo "$REPLY" |sed -n -E 's/^-E -([0-9]+)$/\1/p')"
+			if [[ ! ($Filenum -gt 0 && $Filenum -le $(find "$HOME/temp1/" -name '*.ovpn*' | wc -l)) ]]; then ######## checking user input
+				echo "invalid file number"
+			     	sleep 3	
+				continue
+			fi
+			#echo "$Filenum"
+			F2EDIT="$(find "$HOME/temp1/" -name '*.ovpn*' | sort | nl | sed -n "$Filenum"'p' | sed -n -E 's/^ +([0-9]+).+(\/root.+)/\2/p')"
+			#echo "$F2EDIT"
+			nano $F2EDIT
+			continue
+		fi
+		if [[ "$REPLY" =~ ^-P" "-[0-9]+$ ]]; then      ############ checking users input
+			Filenum="$(echo "$REPLY" |sed -n -E 's/^-P -([0-9]+)$/\1/p')"
+			if [[ ! ($Filenum -gt 0 && $Filenum -le $(find "$HOME/temp1/" -name '*.ovpn*' | wc -l)) ]]; then ######## checking user input
+				echo "invalid file number"
+				sleep 3
+				continue
+			fi
+			F2PROCESS="$(find "$HOME/temp1/" -name '*.ovpn*' | sort | nl | sed -n "$Filenum"'p' | sed -n -E 's/^ +([0-9]+).+(\/root.+)/\2/p')"
+			if [ ! -d "$HOME/SCRIPT2PROCESS" ];then      ######### creating or cleaning the processing directory
+				mkdir "$HOME/SCRIPT2PROCESS"
+			else
+				rm -r  $HOME/SCRIPT2PROCESS/*
+			fi
+			cp "$F2PROCESS" "$HOME/SCRIPT2PROCESS/F2PROCESS" ######### copying the file to process to the processing directory
+			break
+		fi
+		if [ "$REPLY" == "-M" ];then
+			less "$HOME/temp1/README"
+			continue
+		fi
+		if [ "$REPLY" == q ]; then
+			clear
+			exit 1
+		fi
+		echo "invalid syntax"
+		sleep 1
+	done
+       	
+}
+###################################################### End of copying and modifying by User functions 
+
+###################################################### File Processing functions
+pingable(){ ############## checks whether an input is a pingable address
+	#ping $TO_PING
+	result="$(echo "$(ping -q -w 5 $TO_PING 2>&1)")"
+	#echo "$result"
+	if echo "$result"| grep "packets transmitted" > /dev/null; then ##### if the address is pingable an attempt to send packets was made
+		echo "0"
+	else
+		echo "1"
+	fi
+}
+IS_URL_IP(){
+	if [[ "$tested" =~ (([0-9]{3}|[0-9]{2}|[0-9])\.){3}([0-9]{3}|[0-9]{2}|[0-9]{1}) ]];then ############## if IP then output 0 if URL then output 1
+		echo "0"
+	else
+		echo "1"
+	fi	
+}
+DNS_LOOKUP(){	
+	while read line;do	
+		echo "$num_line $line" >> $HOME/SCRIPT2PROCESS/IP_FILE
+	done < <(dig +short $URL 2> /dev/null)
+}
+######################################################## End of Processing functions
+####################################################### File Editing Function
+CREATE_FILES(){ ################## creating for each IP found a file and editing it so that only the line containing the connection IP is read by the OVPN server
+	if [ ! -d "$HOME/SCRIPT2PROCESS/EDITED" ];then
+		mkdir "$HOME/SCRIPT2PROCESS/EDITED"
+	else
+		rm -r $HOME/SCRIPT2PROCESS/EDITED/*
+	fi
+	counter=0
+	while read line;do
+		cp "$HOME/SCRIPT2PROCESS/F2PROCESS" "$HOME/SCRIPT2PROCESS/EDITED/$counter"	##### creating new configuration file
+		#nano $HOME/SCRIPT2PROCESS/EDITED/$counter
+		for i in "${!PING_ABLES[@]}";do
+			#echo "$i"
+			OLD_LINE="$(sed -n "$i"'p' $HOME/SCRIPT2PROCESS/F2PROCESS)" ####### original line with a URL or IP
+			#echo "$OLD_LINE"
+			sed -i "$i"'s/'"$OLD_LINE"'/#'"$OLD_LINE"'/' "$HOME/SCRIPT2PROCESS/EDITED/$counter"           ###### replacing the original line with itslef prefixed by "#" in order to by ignored
+		done
+		num_line="$(echo "$line" | awk '{print $1}')" ############ adding the only connection line that is readable
+		OLD_LINE="$(sed -n "$num_line"'p' $HOME/SCRIPT2PROCESS/F2PROCESS)"
+		URL_IP="$(echo "$OLD_LINE" | awk '{print $2}')"
+		IP="$(echo "$line" | awk '{print $2}')"
+		ADD_LINE="$(echo "$OLD_LINE" | sed 's/'"$URL_IP"'/'"$IP"'/')"
+		#echo "$ADD_LINE"
+		sed -i "$num_line"'a'"$ADD_LINE" "$HOME/SCRIPT2PROCESS/EDITED/$counter"
+		counter=$(( $counter + 1 ))
+	done < $HOME/SCRIPT2PROCESS/IP_FILE
+}
+CREATE_FOR_DISPLAY(){
+	counter=0
+	>$HOME/SCRIPT2PROCESS/TO_DISPLAY
+	printf "\tFILE_NUM\t\t  IP\t\t\tPORT_NUM\t\tSUCCESFULL_RUNS\t\tUNSUCCESFULL_RUNS\t\tTOTAL_RUNS\t\tGEO_LOCATION\n" >$HOME/SCRIPT2PROCESS/TO_DISPLAY	
+	printf "###############################################################################################################################################################################\n" >>$HOME/SCRIPT2PROCESS/TO_DISPLAY
+	while read line;do
+		IP="$(echo "$line" | awk '{print $2}')"
+		num_line="$(echo "$line" | awk '{print $1}')" 
+		OLD_LINE="$(sed -n "$num_line"'p' $HOME/SCRIPT2PROCESS/F2PROCESS)"
+		######################################## finding the port number
+		num_of_words="$(echo "$OLD_LINE" | wc -w)"
+		if [[ $num_of_words -eq 3 && "$(echo "$OLD_LINE" | awk '{print $3}' | tr -d '\r')" =~ [0-9]+ ]];then
+			port_num="$(echo "$OLD_LINE" | awk '{print $3}' | tr -d '\r')"
+		elif [[ $num_of_words -eq 4 && "$(echo "$OLD_LINE" | awk '{print $4}' | tr -d '\r')" =~ [0-9]+ && "$(echo "$OLD_LINE" | awk '{print $3}')" == port ]];then
+			port_num="$(echo "$OLD_LINE" | awk '{print $4}' | tr -d '\r')"
+		elif [[ "$(grep -cs -E '^port [0-9]+' $HOME/SCRIPT2PROCESS/F2PROCESS)" -eq 1 && "$(grep -E '^port [0-9]+' $HOME/SCRIPT2PROCESS/F2PROCESS | wc -w)" -eq 2 ]];then
+			port_num="$(grep -E '^port [0-9]+' $HOME/SCRIPT2PROCESS/F2PROCESS | awk '{print $2}'| tr -d '\r')"
+		else
+			port_num="___"
+		fi	
+		#######################################
+		printf "\t   %s   \t\t      %s\t\t  %s\t\t\t\t%03d\t\t\t%03d\t\t\t  %03d  \t\t\t%12s\n" "$counter" "$IP" "$port_num" "0" "0" "0" "NOT_DETERM" >>$HOME/SCRIPT2PROCESS/TO_DISPLAY
+	printf "###############################################################################################################################################################################\n" >>$HOME/SCRIPT2PROCESS/TO_DISPLAY
+		counter=$(( $counter + 1 ))
+	done < $HOME/SCRIPT2PROCESS/IP_FILE
+}
+######################################################## End of file processing functions
+######################################################## RUN files functions
+CHOOSE2EDIT_RUN(){
+	while true; do
+		clear
+		echo -e " #################################################################################################" ######## creating headers
+		echo -e "\t\tTo edit write: -E -Filenum \n\t\tTo Run a file write: -R -Filenum \n\t\tTo view latest LOG file write: -L\n\t\tTo view Files list and statistics write:-M\n\t\tTo a File to be burned on a CD write: -B -Filenum\n\t\tTo burn all the files that ran succesfully at least once write: -B -a\n\t\tTo exit write: q " 
+		echo -e " #################################################################################################"
+		read
+		if [[ "$REPLY" =~ ^-E" "-[0-9]+$ ]]; then      ############ checking users input format IF EDIT
+			Filenum="$(echo "$REPLY" |sed -n -E 's/^-E -([0-9]+)$/\1/p')"
+			if [[ $(( $num_of_files - 1 )) -lt $Filenum ]]; then ######## checking user input
+				echo "invalid file number"
+			     	sleep 3	
+				continue
+			fi
+			F2EDIT="$HOME/SCRIPT2PROCESS/EDITED/$Filenum"
+			#echo "$F2EDIT"
+			nano $F2EDIT
+			continue
+		fi
+		if [[ "$REPLY" =~ ^-R" "-[0-9]+$ ]]; then      ############ checking users input IF RUN
+			Filenum="$(echo "$REPLY" |sed -n -E 's/^-R -([0-9]+)$/\1/p')"
+			if [[ $(( $num_of_files - 1 )) -lt $Filenum ]]; then ######## checking user input
+				echo "invalid file number"
+				sleep 3
+				continue
+			fi
+			echo "$Filenum" > $HOME/SCRIPT2PROCESS/TRANSMITTER
+			break
+		fi
+		if [[ "$REPLY" =~ ^-B" "-[0-9]+$ ]]; then      ############ checking users input IF BURN FILE
+			Filenum="$(echo "$REPLY" |sed -n -E 's/^-B -([0-9]+)$/\1/p')"
+			if [[ $(( $num_of_files - 1 )) -lt $Filenum ]]; then ######## checking user input
+				echo "invalid file number"
+				sleep 3
+				continue
+			fi
+			echo "B $Filenum" > $HOME/SCRIPT2PROCESS/TRANSMITTER
+			break
+		fi
+		if [[ "$REPLY" == "-B -a" ]]; then      ############ checking users input if BURN all working files
+			echo "B" > $HOME/SCRIPT2PROCESS/TRANSMITTER
+			break
+		fi
+		if [ "$REPLY" == "-M" ];then
+			less "$HOME/SCRIPT2PROCESS/TO_DISPLAY"
+			continue
+		fi
+		if [[ "$REPLY" == -L ]];then
+			if [ -e  $HOME/SCRIPT2PROCESS/LOG/log ];then
+				less $HOME/SCRIPT2PROCESS/LOG/log
+			else
+				echo "no log file was found"
+				sleep 3
+				continue
+			fi
+		fi
+		if [ "$REPLY" == q ]; then
+			echo "q" > $HOME/SCRIPT2PROCESS/TRANSMITTER
+			clear
+			break
+		fi
+		echo "invalid syntax"
+		sleep 1
+	done
+       	
+}
+TO_RUN(){  ######### this function should run the internal script in the VM and output the "RESULT_FILE" in the Processing directory.
+#The RESULT_FILE consists of two lines at most.
+#The first line contains the result of the run: 0-for success 1-for failure.
+#A successful run would write a second line that contains the result of the IP GEO LOCATION QUERY.
+#An unsuccesful run should not output to the file a second line but in further analysis the LOG file is retreived.
+>$HOME/SCRIPT2PROCESS/RESULT_FILE
+random_result=$(( $RANDOM % 2 ))
+echo "$random_result" > $HOME/SCRIPT2PROCESS/RESULT_FILE
+#echo "$random_result"
+if [[ $random_result -eq 0 ]];then
+	echo "GERMANY" >> $HOME/SCRIPT2PROCESS/RESULT_FILE
+fi
+less $HOME/SCRIPT2PROCESS/RESULT_FILE
+ }
+##############################################################
+ANALYZE_RESULT(){ ######### This function should read the RESULT_FILE and output 0 and the GEO LOCATION for sucessful RUN and 1 for unsuccesfull RUN
+	if [ ! -d $HOME/SCRIPT2PROCESS/LOG ];then
+		mkdir $HOME/SCRIPT2PROCESS/LOG
+	else
+		rm $HOME/SCRIPT2PRCESS/LOG/* 2> /dev/null
+	fi
+	answer="$(sed -n '1p' "$HOME/SCRIPT2PROCESS/RESULT_FILE" | sed 's/\r//')"  ###Should be 0/1"
+	if [ "$answer" -eq 1 ];then
+		echo "$answer"
+                ################## there should be a command that gets the VPN log file from the VM and placing it as $HOME/SCRIPT2PROCESS/LOG/log
+	else
+		GEO_LOCATION="$(sed -n '2p' "$HOME/SCRIPT2PROCESS/RESULT_FILE" | sed 's/\r//')"  ###Should be a country's name
+		echo "$answer $GEO_LOCATION" 
+	fi
+ }
+ADD_SUCCESS_STAT(){ ####### Updates stats after RUN
+	NUM_LINE="$(( $NUM_FILE_RUN * 2 + 3 ))"
+	OLD_LINE="$( sed -n "$NUM_LINE"'p' $HOME/SCRIPT2PROCESS/TO_DISPLAY )"  ######Line to be updated
+	STAT_SUCESS_OLD="$(echo "$OLD_LINE" | awk '{print $4}')"
+	STAT_SUCESS_NEW="$(printf "%03d" "${SUCESS_RUNS[$NUM_FILE_RUN]}")"
+	NEW_LINE="$(echo "$OLD_LINE" | sed -E -n 's/(.+\t\t\t\t)('"$STAT_SUCESS_OLD"')(.+)?/\1'"$STAT_SUCESS_NEW"'\3/p')"  #####Line after success collum update
+	STAT_TOTAL_OLD="$(echo "$OLD_LINE" | awk '{print $6}')"
+	STAT_TOTAL_NEW="$(printf "%03d" "${TOTAL_RUNS[$NUM_FILE_RUN]}")"
+	NEW_LINE="$(echo "$NEW_LINE" | sed -E -n 's/(.+\t\t\t'"  "')('"$STAT_TOTAL_OLD"')(.+)/\1'"$STAT_TOTAL_NEW"'\3/p')" #######Line after "total attempts" collum update 
+	STAT_GEO_OLD="$(echo "$OLD_LINE" | awk '{print $7}')"
+	STAT_GEO_NEW="$GEO_LOCATION"
+	NEW_LINE="$(echo "$NEW_LINE" | sed  's/'"$STAT_GEO_OLD"'/'"$STAT_GEO_NEW"'/')" ########Line after GEO collum update
+	sed -i "$NUM_LINE"'s/'"$OLD_LINE"'/'"$NEW_LINE"'/' $HOME/SCRIPT2PROCESS/TO_DISPLAY ############## updating DISPLAY_FILE
+	#less $HOME/SCRIPT2PROCESS/TO_DISPLAY
+}
+ADD_FAILED_STAT(){
+	NUM_LINE="$(( $NUM_FILE_RUN * 2 + 3 ))"
+	OLD_LINE="$( sed -n "$NUM_LINE"'p' $HOME/SCRIPT2PROCESS/TO_DISPLAY )"  ######Line to be updated
+	STAT_FAIL_OLD="$(echo "$OLD_LINE" | awk '{print $5}')"
+	STAT_FAIL_NEW="$(printf "%03d" "${FAILED_RUNS[$NUM_FILE_RUN]}")"
+	NEW_LINE="$(echo "$OLD_LINE" | sed -E -n 's/(.+[^\t]\t\t\t)('"$STAT_FAIL_OLD"')(.+)?/\1'"$STAT_FAIL_NEW"'\3/p')"  #####Line after Failure collum update
+	STAT_TOTAL_OLD="$(echo "$OLD_LINE" | awk '{print $6}')"
+	STAT_TOTAL_NEW="$(printf "%03d" "${TOTAL_RUNS[$NUM_FILE_RUN]}")"
+	NEW_LINE="$(echo "$NEW_LINE" | sed -E -n 's/(.+\t\t\t'"  "')('"$STAT_TOTAL_OLD"')(.+)/\1'"$STAT_TOTAL_NEW"'\3/p')" #######Line after "total attempts" collum update 
+	sed -i "$NUM_LINE"'s/'"$OLD_LINE"'/'"$NEW_LINE"'/' $HOME/SCRIPT2PROCESS/TO_DISPLAY ############## updating DISPLAY_FILE
+}
+######################################################### End of RUN files functions
+######################################################## Burn Function
+TO_BURN(){
+	rm $HOME/SCRIPT2/RPCESS/TO_GO.iso 2> /dev/null ############ deleting former iso file if existed
+	genisoimage -o $HOME/SCRIPT2PROCESS/TO_GO.iso -R -J $HOME/SCRIPT2PROCESS/TO_BURN ####### creating new iso file with the files sent to be burnt
+	#################################################### it's important to make sure that a blank disc was inserted
+	while true;do
+		clear
+		echo -e "To start writing on the blank CD  write: 0\nTo return to the main options write: q"
+		read
+		if [ "$REPLY" == 0 ];then ################ now we will check that a disc was inserted and that it's blank
+			echo "you chose to burn"
+			####### wodim dev=/dev/sr0/ $HOME/SCRIPT2PROCESS/TO_GO.iso ################ writing to cd the image with the files
+			if [ "$?" -eq 0 ];then #########checking 
+				echo "burning was succesful"
+				sleep 3
+			else
+				echo "burning was unsuccesful"
+				sleep 3
+				continue
+			fi
+		elif [[ "$REPLY" == q ]];then
+			break
+		else
+			echo "syntax error"
+			sleep 4
+		fi
+	done
+}
+########################################################
+########## MAIN
+check_internet
+check_disk
+mount_p="$(mount_point)"
+#echo "$mount_p"
+copy_VPN_files
+copy_Login_ETC_files
+#create_display_file
+chose2edit_process
+########################### Find all the URLs or IP'S in the file
+clear
+while read line; do
+	num_line="$(echo "$line" | awk -F ":" '{print $1}')" ################# extracts the line number , VERY IMPORTANT for the further processing of file
+	TO_PING=$(echo "$line" | awk -F ":" '{print $2}' | awk '{print $2}'| tr -d '\r ') ######## extracts the string that is sent to the "pingable" test, extremly importnat NOT TO QOUTE!!
+	#echo "$num_line"
+	IS_PING="$(pingable)"
+	if [ "$IS_PING" -eq 0 ];then
+		#echo "$TO_PING is pingable"
+		PING_ABLES["$num_line"]="$TO_PING" ################# the pingable strings are placed in an array whose indexes are the line numbers
+	else
+		echo ""
+		#echo "$TO_PING isn't pingable"
+	fi
+done < <(grep -n -E '^remote ' $HOME/SCRIPT2PROCESS/"$(ls $HOME/SCRIPT2PROCESS)") ###### finds all the lines that start with 'remote ' in the chosen file
+clear
+if [ ${#PING_ABLES[@]} -eq 0 ];then
+	echo -e "No URLS or IPS found on this configuration file \nthe script will now exit"
+	exit 
+fi
+#echo "exists"
+########################### from the "PING_ABLES" we will seperate URLS FROM IPS
+for i in "${!PING_ABLES[@]}";do
+	num_line="$i"
+	tested="${PING_ABLES[$i]}"
+	#IS_URL_IP
+	result="$(IS_URL_IP)"
+	#echo "$tested , $result"
+	if [ $result -eq 0 ];then
+		IPS[$i]=$tested ######## an array containing the IPS
+	else
+		URLS[$i]=$tested ######## an array containing the URLS
+	fi
+done
+###########################
+##################################### creating the IP_FILE 
+>$HOME/SCRIPT2PROCESS/IP_FILE
+for i in "${!URLS[@]}";do
+	num_line="$i"
+	URL="${URLS[$i]}"
+	DNS_LOOKUP
+done
+for i in "${!IPS[@]}";do	
+	num_line="$i"
+	IP="${IPS[$i]}"
+	echo "$num_line $IP" >> $HOME/SCRIPT2PROCESS/IP_FILE
+done
+#########################################
+if [ "$(cat $HOME/SCRIPT2PROCESS/IP_FILE | wc -l)" -eq 0 ];then ######### in case that the IP_FILE is empty 
+	clear
+	echo "no URL resulted in DNS query to IP and no IPs were found in the file itself"
+	exit
+fi
+####################################### Creating edited configuration files
+CREATE_FILES
+##### REMEMBER TO ADD THE AUTH LINE IN THE EDITING
+CREATE_FOR_DISPLAY
+num_of_files="$(cat $HOME/SCRIPT2PROCESS/IP_FILE | wc -l)"
+########################################### THE RUN !
+counter=0
+while read line;do  ###################### resets the RUN data arrays: total number of runs , number of succesful runs and number of unsucessful runs of each file
+	TOTAL_RUNS[$counter]=0
+	SUCESS_RUNS[$counter]=0
+	FAILED_RUNS[$counter]=0
+	counter="$(( $counter +1 ))"
+done < "$HOME"/SCRIPT2PROCESS/IP_FILE
+while true; do
+	CHOOSE2EDIT_RUN
+	clear
+	answer="$(cat $HOME/SCRIPT2PROCESS/TRANSMITTER)"
+	if [[ $answer =~ ^[0-9]+$ ]];then ########## if files were sent to run
+		#echo "yes"
+		NUM_FILE_RUN="$answer"
+		F2RUN="$HOME/SCRIPT2PROCESS/EDITED/$answer"
+		TOTAL_RUNS["$answer"]="$(( ${TOTAL_RUNS["$answer"]} + 1 ))" 
+		TO_RUN
+		RESULT="$(ANALYZE_RESULT)"
+		if [[ $(echo "$RESULT" | wc -w) -eq 2 ]];then ##### in case of success
+			SUCESS_RUNS["$answer"]="$(( ${SUCESS_RUNS["$answer"]} + 1 ))"
+			GEO_LOCATION="$(echo "$RESULT" | awk '{print $2}')"
+			#echo "$GEO_LOCATION"
+			#sleep 10
+			#ADD_SUCESS_LIST 
+			ADD_SUCCESS_STAT
+		else
+			FAILED_RUNS["$answer"]="$(( ${FAILED_RUNS["$answer"]} + 1 ))"
+			#ADD_LOG_FILE
+			ADD_FAILED_STAT
+		fi
+
+	fi
+	if [[ "$answer" == "B" ]]; then
+		if [ ! -d $HOME/SCRIPT2PROCESS/TO_BURN/ ];then  ###### cleaning or creating the directory to be burned on the cd
+			mkdir $HOME/SCRIPT2PROCESS/TO_BURN
+		else
+			rm $HOME/SCRIPT2PROCESS/TO_BURN/*
+		fi
+		for i in "${!SUCESS_RUNS[@]}";do
+			if [[ "${SUCESS_RUNS[i]}" -ne 0 ]]; then
+				cp $HOME/SCRIPT2PROCESS/EDITED/$i $HOME/SCRIPT2PROCESS/TO_BURN
+			fi
+		done
+		if [ "$(ls $HOME/SCRIPT2PROCESS/TO_BURN/ | wc -w)" -eq 0 ];then
+			echo "There no files that were sucessfull"
+			sleep 5
+			continue
+		else
+			echo "i copied stuff "
+			cp $HOME/ETC/* $HOME/SCRIPT2PROCESS/TO_BURN     ####### copying the Login detailes file and auxillary files 
+		fi
+		TO_BURN
+	fi
+	if [[ "$answer" =~ ^B" "[0-9]+ ]]; then
+		if [ ! -d $HOME/SCRIPT2PROCESS/TO_BURN/ ];then  ###### cleaning or creating the directory to be burned on the cd
+			mkdir $HOME/SCRIPT2PROCESS/TO_BURN
+		else
+			rm $HOME/SCRIPT2PROCESS/TO_BURN/*
+		fi
+		FILE2BURN=$HOME/SCRIPT2PROCESS/EDITED/"$(echo "$answer" | awk '{print $2}')"
+		cp $FILE2BURN $HOME/SCRIPT2PROCESS/TO_BURN
+		cp $HOME/ETC/* $HOME/SCRIPT2PROCESS/TO_BURN     ####### copying the Login detailes file and auxillary files 
+		TO_BURN
+	fi
+	if [ $answer == q ];then ################# if decided to finish Running files
+		echo "bye"
+		break
+	fi
+done
+############################################
